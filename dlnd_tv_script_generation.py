@@ -231,7 +231,7 @@ tests.test_get_inputs(get_inputs)
 # In[9]:
 
 
-def get_init_cell(batch_size, rnn_size, keep_prob=0.8, layers=3):
+def get_init_cell(batch_size, rnn_size, layers=3):
     """
     Create an RNN Cell and initialize it.
     :param batch_size: Size of batches
@@ -239,7 +239,6 @@ def get_init_cell(batch_size, rnn_size, keep_prob=0.8, layers=3):
     :return: Tuple (cell, initialize state)
     """
     cell = tf.contrib.rnn.BasicLSTMCell(rnn_size)
-    cell = tf.contrib.rnn.DropoutWrapper(cell, output_keep_prob=keep_prob)
     multi = tf.contrib.rnn.MultiRNNCell([cell] * layers)
     init_state = multi.zero_state(batch_size, tf.float32)
     init_state = tf.identity(init_state, 'initial_state')
@@ -313,10 +312,10 @@ tests.test_build_rnn(build_rnn)
 # 
 # Return the logits and final state in the following tuple (Logits, FinalState) 
 
-# In[13]:
+# In[12]:
 
 
-def build_nn(cell, rnn_size, input_data, vocab_size):
+def build_nn(cell, rnn_size, input_data, vocab_size, embed_dim):
     """
     Build part of the neural network
     :param cell: RNN cell
@@ -325,7 +324,7 @@ def build_nn(cell, rnn_size, input_data, vocab_size):
     :param vocab_size: Vocabulary size
     :return: Tuple (Logits, FinalState)
     """
-    embed = get_embed(input_data, vocab_size, rnn_size)
+    embed = get_embed(input_data, vocab_size, embed_dim)
     outputs, final_state = build_rnn(cell, embed)
     logits = tf.contrib.layers.fully_connected(outputs, vocab_size, activation_fn=None)
     return logits, final_state
@@ -344,28 +343,38 @@ tests.test_build_nn(build_nn)
 # 
 # If you can't fill the last batch with enough data, drop the last batch.
 # 
-# For exmple, `get_batches([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], 2, 3)` would return a Numpy array of the following:
+# For exmple, `get_batches([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], 3, 2)` would return a Numpy array of the following:
 # ```
 # [
 #   # First Batch
 #   [
 #     # Batch of Input
-#     [[ 1  2  3], [ 7  8  9]],
+#     [[ 1  2], [ 7  8], [13 14]]
 #     # Batch of targets
-#     [[ 2  3  4], [ 8  9 10]]
-#   ],
-#  
+#     [[ 2  3], [ 8  9], [14 15]]
+#   ]
+# 
 #   # Second Batch
 #   [
 #     # Batch of Input
-#     [[ 4  5  6], [10 11 12]],
+#     [[ 3  4], [ 9 10], [15 16]]
 #     # Batch of targets
-#     [[ 5  6  7], [11 12 13]]
+#     [[ 4  5], [10 11], [16 17]]
+#   ]
+# 
+#   # Third Batch
+#   [
+#     # Batch of Input
+#     [[ 5  6], [11 12], [17 18]]
+#     # Batch of targets
+#     [[ 6  7], [12 13], [18  1]]
 #   ]
 # ]
 # ```
+# 
+# Notice that the last target value in the last batch is the first input value of the first batch. In this case, `1`. This is a common technique used when creating sequence batches, although it is rather unintuitive.
 
-# In[14]:
+# In[13]:
 
 
 def get_batches(int_text, batch_size, seq_length):
@@ -377,17 +386,18 @@ def get_batches(int_text, batch_size, seq_length):
     :return: Batches as a Numpy array
     """
     # TODO: Implement Function
-    n_batches = len(int_text) // (batch_size * seq_length)
-    result = []
-    for i in range(n_batches):
-        inputs = []
-        targets = []
-        for j in range(batch_size):
-            idx = i * seq_length + j * seq_length
-            inputs.append(int_text[idx:idx + seq_length])
-            targets.append(int_text[idx + 1:idx + seq_length + 1])
-        result.append([inputs, targets])
-    return np.array(result)
+    n_batches = int(len(int_text) / (batch_size * seq_length))
+    
+    # Drop the last few characters to make only full batches
+    xdata = np.array(int_text[: n_batches * batch_size * seq_length])
+    
+    ydata = np.array(int_text[1: n_batches * batch_size * seq_length + 1])
+    ydata[-1] = xdata[0]
+
+    x_batches = np.split(xdata.reshape(batch_size, -1), n_batches, 1)
+    y_batches = np.split(ydata.reshape(batch_size, -1), n_batches, 1)
+    
+    return np.array(list(zip(x_batches, y_batches)))
 
 
 """
@@ -407,17 +417,19 @@ tests.test_get_batches(get_batches)
 # - Set `learning_rate` to the learning rate.
 # - Set `show_every_n_batches` to the number of batches the neural network should print progress.
 
-# In[18]:
+# In[67]:
 
 
 # Number of Epochs
-num_epochs = 100
+num_epochs = 210
 # Batch Size
-batch_size = 128
+batch_size = 256
 # RNN Size
 rnn_size = 256
+# Embedding Dimension Size
+embed_dim = 256
 # Sequence Length
-seq_length = 25
+seq_length = 20
 # Learning Rate
 learning_rate = 0.01
 # Show stats for every n number of batches
@@ -432,7 +444,7 @@ save_dir = './save'
 # ### Build the Graph
 # Build the graph using the neural network you implemented.
 
-# In[19]:
+# In[68]:
 
 
 """
@@ -446,7 +458,7 @@ with train_graph.as_default():
     input_text, targets, lr = get_inputs()
     input_data_shape = tf.shape(input_text)
     cell, initial_state = get_init_cell(input_data_shape[0], rnn_size)
-    logits, final_state = build_nn(cell, rnn_size, input_text, vocab_size)
+    logits, final_state = build_nn(cell, rnn_size, input_text, vocab_size, embed_dim)
 
     # Probabilities for generating words
     probs = tf.nn.softmax(logits, name='probs')
@@ -469,7 +481,7 @@ with train_graph.as_default():
 # ## Train
 # Train the neural network on the preprocessed data.  If you have a hard time getting a good loss, check the [forms](https://discussions.udacity.com/) to see if anyone is having the same problem.
 
-# In[20]:
+# In[69]:
 
 
 """
@@ -508,7 +520,7 @@ with tf.Session(graph=train_graph) as sess:
 # ## Save Parameters
 # Save `seq_length` and `save_dir` for generating a new TV script.
 
-# In[21]:
+# In[70]:
 
 
 """
@@ -520,7 +532,7 @@ helper.save_params((seq_length, save_dir))
 
 # # Checkpoint
 
-# In[22]:
+# In[71]:
 
 
 """
@@ -545,7 +557,7 @@ seq_length, load_dir = helper.load_params()
 # 
 # Return the tensors in the following tuple `(InputTensor, InitialStateTensor, FinalStateTensor, ProbsTensor)` 
 
-# In[23]:
+# In[72]:
 
 
 def get_tensors(loaded_graph):
@@ -570,7 +582,7 @@ tests.test_get_tensors(get_tensors)
 # ### Choose Word
 # Implement the `pick_word()` function to select the next word using `probabilities`.
 
-# In[24]:
+# In[73]:
 
 
 def pick_word(probabilities, int_to_vocab):
@@ -593,12 +605,12 @@ tests.test_pick_word(pick_word)
 # ## Generate TV Script
 # This will generate the TV script for you.  Set `gen_length` to the length of TV script you want to generate.
 
-# In[28]:
+# In[77]:
 
 
 gen_length = 200
 # homer_simpson, moe_szyslak, or Barney_Gumble
-prime_word = 'moe_szyslak'
+prime_word = 'homer_simpson'
 
 """
 DON'T MODIFY ANYTHING IN THIS CELL THAT IS BELOW THIS LINE
